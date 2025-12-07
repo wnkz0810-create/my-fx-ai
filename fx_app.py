@@ -9,19 +9,59 @@ from sklearn.ensemble import RandomForestRegressor
 import optuna
 
 # ページの設定
-st.set_page_config(page_title="FX AI Quant System (TP/SL)", layout="wide")
+st.set_page_config(page_title="Multi-Asset AI Quant System", layout="wide")
 
-st.title("🤖 FX AI Quant System (Pro)")
-st.write("予測、バックテスト、最適化に加え、**「利確 (TP)・損切 (SL)」**のリスク管理機能を搭載しました。")
+st.title("🤖 Multi-Asset AI Quant System")
+st.write("ドル円、ゴールドなど、複数の銘柄に対応したAI予測・最適化システムです。")
 
-# --- サイドバー設定 ---
-st.sidebar.header("基本設定")
-ticker = st.sidebar.text_input("通貨ペア", "JPY=X")
+# --- サイドバー設定 (通貨ペア選択) ---
+st.sidebar.header("銘柄選択")
 
-# データ取得（OHLCすべて取得）
+# 選択肢の定義
+pair_options = {
+    "Gold/USD (XAUUSD=X)": "XAUUSD=X",
+    "USD/JPY (ドル円)": "JPY=X",
+    "EUR/USD (ユーロドル)": "EURUSD=X",
+    "BTC/USD (ビットコイン)": "BTC-USD"
+}
+
+selected_label = st.sidebar.selectbox("トレードする銘柄", list(pair_options.keys()))
+ticker = pair_options[selected_label]
+
+# --- 通貨ごとのデフォルト設定を定義 ---
+# ※通貨を切り替えたときに、入力欄の初期値を自動変更するためのロジック
+if ticker == "XAUUSD=X":
+    # ゴールド用（ボラティリティが大きい）
+    def_th = 2.00   # 2ドル動いたらエントリー
+    def_tp = 10.00  # 利確10ドル
+    def_sl = 5.00   # 損切5ドル
+    num_step = 0.10 # 入力の刻み幅
+    curr_unit = "$"
+elif ticker == "JPY=X":
+    # ドル円用
+    def_th = 0.050
+    def_tp = 0.500
+    def_sl = 0.200
+    num_step = 0.001
+    curr_unit = "円"
+elif ticker == "BTC-USD":
+    # ビットコイン用
+    def_th = 100.0
+    def_tp = 500.0
+    def_sl = 300.0
+    num_step = 10.0
+    curr_unit = "$"
+else:
+    # ユーロドルなど（ボラティリティが小さい）
+    def_th = 0.0010
+    def_tp = 0.0050
+    def_sl = 0.0020
+    num_step = 0.0001
+    curr_unit = "pips"
+
+# --- データ取得関数 ---
 @st.cache_data(ttl=3600)
 def get_historical_data(ticker_symbol, period="2y", interval="1h"):
-    # 損切判定のためにHighとLowも必要
     df = yf.download(ticker_symbol, period=period, interval=interval, progress=False)
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
@@ -42,39 +82,31 @@ def get_realtime_price(ticker_symbol):
         return None
     return None
 
-# バックテストロジック（TP/SL対応版）
-def run_backtest_logic(df_original, params, test_period_days):
+# --- バックテストロジック ---
+def run_backtest_logic(df_original, params, test_period_days, spread_cost=0):
     df = df_original.copy()
     
-    # パラメータ展開
     sma_s = params.get('sma_short', 5)
     sma_l = params.get('sma_long', 25)
     threshold = params.get('threshold', 0.05)
     n_estimators = params.get('n_estimators', 100)
+    tp_val = params.get('tp', 0.50)
+    sl_val = params.get('sl', 0.20)
     
-    # TP/SL設定（円単位: 0.1 = 10銭）
-    tp_val = params.get('tp', 0.50) # デフォルトは広めに（実質時間決済）
-    sl_val = params.get('sl', 0.20) # デフォルト20銭で損切
-    
-    # 特徴量作成
     df['SMA_Short'] = df['Close'].rolling(window=sma_s).mean()
     df['SMA_Long'] = df['Close'].rolling(window=sma_l).mean()
     df['Change'] = df['Close'].pct_change()
-    
     df['Std'] = df['Close'].rolling(window=20).std()
     df['Upper_Band'] = df['SMA_Long'] + (df['Std'] * 2)
     df['Lower_Band'] = df['SMA_Long'] - (df['Std'] * 2)
 
     df['Next_Close'] = df['Close'].shift(-1)
-    # TP/SL判定用に次の足のHigh/Lowも取得
     df['Next_High'] = df['High'].shift(-1)
     df['Next_Low'] = df['Low'].shift(-1)
-    
     df = df.dropna()
 
     features = ['Close', 'SMA_Short', 'SMA_Long', 'Change', 'Upper_Band', 'Lower_Band']
     X = df[features]
-    # 正解ラベルは学習用にはCloseを使う
     y = df['Next_Close']
 
     test_rows = test_period_days * 24
@@ -85,34 +117,25 @@ def run_backtest_logic(df_original, params, test_period_days):
     y_train = y.iloc[:-test_rows]
     X_test = X.iloc[-test_rows:]
     
-    # テスト用の正解データ群
     y_test_close = df['Next_Close'].iloc[-test_rows:]
     y_test_high = df['Next_High'].iloc[-test_rows:]
     y_test_low = df['Next_Low'].iloc[-test_rows:]
     price_test = df['Close'].iloc[-test_rows:]
 
-    # 学習
     model = RandomForestRegressor(n_estimators=n_estimators, random_state=42)
     model.fit(X_train, y_train)
-    
     predictions = model.predict(X_test)
     
     balance = 1000000 
     cumulative_profit = []
     dates = []
-    
-    trade_amount = 10000 
-    spread_cost = 0.003 
-
+    trade_amount = 10000 # ※ゴールドの場合1Lot=100oz等の計算が必要だが、ここではシンプルに変動幅×10000とする
     total_trades = 0
     wins = 0
     
-    # 1時間ごとのシミュレーション
     for i in range(len(X_test)):
         current_price = price_test.iloc[i]
         pred_price = predictions[i]
-        
-        # 実際の次の足の動き
         actual_next_close = y_test_close.iloc[i]
         actual_next_high = y_test_high.iloc[i]
         actual_next_low = y_test_low.iloc[i]
@@ -120,45 +143,32 @@ def run_backtest_logic(df_original, params, test_period_days):
         diff = pred_price - current_price
         profit = 0
         
-        # --- ロング (買い) の場合 ---
         if diff > threshold: 
-            # 目標価格と損切価格を設定
             take_profit_price = current_price + tp_val
             stop_loss_price = current_price - sl_val
             
-            # 判定: その1時間の間にSLかTPに刺さったか？
-            # ※保守的に「SLが先に刺さる」判定を優先します（安全側評価）
             if actual_next_low <= stop_loss_price:
-                # 損切発動
                 profit = (stop_loss_price - current_price - spread_cost) * trade_amount
             elif actual_next_high >= take_profit_price:
-                # 利確発動
                 profit = (take_profit_price - current_price - spread_cost) * trade_amount
                 wins += 1
             else:
-                # どちらにも刺さらず1時間経過 -> 時間決済
                 profit = (actual_next_close - current_price - spread_cost) * trade_amount
                 if profit > 0: wins += 1
-            
             total_trades += 1
             
-        # --- ショート (売り) の場合 ---
         elif diff < -threshold: 
             take_profit_price = current_price - tp_val
             stop_loss_price = current_price + sl_val
             
             if actual_next_high >= stop_loss_price:
-                # 損切発動
                 profit = (current_price - stop_loss_price - spread_cost) * trade_amount
             elif actual_next_low <= take_profit_price:
-                # 利確発動
                 profit = (current_price - take_profit_price - spread_cost) * trade_amount
                 wins += 1
             else:
-                # 時間決済
                 profit = (current_price - actual_next_close - spread_cost) * trade_amount
                 if profit > 0: wins += 1
-            
             total_trades += 1
             
         balance += profit
@@ -178,16 +188,21 @@ tab1, tab2, tab3 = st.tabs(["🔮 未来予測", "📊 バックテスト", "⚙
 
 df_base = get_historical_data(ticker)
 
-# 左サイドバー設定
+# 左サイドバー設定（keyにtickerを含めることで、銘柄変更時に値をリセットさせる）
 st.sidebar.markdown("---")
-st.sidebar.header("パラメータ設定")
+st.sidebar.header(f"パラメータ ({curr_unit})")
 
-p_threshold = st.sidebar.number_input("エントリー閾値 (円)", 0.010, 0.200, 0.050, step=0.001, format="%.3f")
+p_threshold = st.sidebar.number_input(
+    f"エントリー閾値", 0.0000, 1000.0000, def_th, step=num_step, format="%.4f", key=f"th_{ticker}"
+)
 
-# 新機能: TP/SL設定
 st.sidebar.subheader("リスク管理")
-p_tp = st.sidebar.number_input("利確幅 TP (円)", 0.05, 5.00, 0.50, step=0.05, help="これ以上儲かったら即決済")
-p_sl = st.sidebar.number_input("損切幅 SL (円)", 0.05, 5.00, 0.20, step=0.05, help="これ以上損したら即決済")
+p_tp = st.sidebar.number_input(
+    f"利確幅 TP", 0.0000, 2000.0000, def_tp, step=num_step, format="%.4f", key=f"tp_{ticker}"
+)
+p_sl = st.sidebar.number_input(
+    f"損切幅 SL", 0.0000, 1000.0000, def_sl, step=num_step, format="%.4f", key=f"sl_{ticker}"
+)
 
 p_n_est = st.sidebar.number_input("決定木の数", 10, 300, 100)
 p_sma_s = st.sidebar.number_input("短期SMA期間", 2, 20, 5)
@@ -202,16 +217,24 @@ params = {
     "n_estimators": p_n_est
 }
 
+# スプレッドコスト（簡易設定）
+# ゴールドはスプレッドが広いので、ドル円より少し高めに仮定
+if ticker == "XAUUSD=X":
+    spread_cost = 0.30 # 0.3ドル (30pips相当)
+elif ticker == "JPY=X":
+    spread_cost = 0.003 # 0.3銭
+else:
+    spread_cost = 0.0003
+
 # === タブ1: 未来予測 ===
 with tab1:
-    st.header("🔮 AIによる未来予測")
+    st.header(f"🔮 {selected_label} 未来予測")
     
     if st.button("最新レートで予測する", type="primary"):
         with st.spinner("AIが思考中..."):
             df_future = df_base.copy()
             realtime = get_realtime_price(ticker)
             if realtime:
-                # CloseだけでなくOpen/High/Lowも仮置きする（計算用）
                 df_future.iloc[-1, df_future.columns.get_loc('Close')] = realtime
             
             df_future['SMA_Short'] = df_future['Close'].rolling(window=p_sma_s).mean()
@@ -244,24 +267,24 @@ with tab1:
             
             c1, c2 = st.columns(2)
             with c1:
-                st.metric("現在レート", f"{current_price:.3f} 円")
+                st.metric("現在レート", f"{current_price:.2f} {curr_unit}")
             with c2:
-                st.metric("AI予測 (Next 1h)", f"{pred_price:.3f} 円", delta=f"{diff:.3f} 円")
+                st.metric("AI予測 (Next 1h)", f"{pred_price:.2f} {curr_unit}", delta=f"{diff:.2f} {curr_unit}")
             
             st.markdown("---")
             if diff > p_threshold:
                 st.success(f"📈 **買いシグナル** detected!")
                 st.markdown(f"""
-                - **エントリー**: {current_price:.3f}円
-                - **利確目標 (TP)**: {current_price + p_tp:.3f}円
-                - **損切ライン (SL)**: {current_price - p_sl:.3f}円
+                - **エントリー**: {current_price:.2f}
+                - **利確目標 (TP)**: {current_price + p_tp:.2f}
+                - **損切ライン (SL)**: {current_price - p_sl:.2f}
                 """)
             elif diff < -p_threshold:
                 st.error(f"📉 **売りシグナル** detected!")
                 st.markdown(f"""
-                - **エントリー**: {current_price:.3f}円
-                - **利確目標 (TP)**: {current_price - p_tp:.3f}円
-                - **損切ライン (SL)**: {current_price + p_sl:.3f}円
+                - **エントリー**: {current_price:.2f}
+                - **利確目標 (TP)**: {current_price - p_tp:.2f}
+                - **損切ライン (SL)**: {current_price + p_sl:.2f}
                 """)
             else:
                 st.warning("✋ 様子見 (予測幅が小さいです)")
@@ -270,13 +293,12 @@ with tab1:
             st.subheader("直近チャート")
             chart_data = df_future.tail(72)
             fig, ax = plt.subplots(figsize=(12, 5))
-            ax.plot(chart_data.index, chart_data['Close'], label="History", color="blue")
+            ax.plot(chart_data.index, chart_data['Close'], label="History", color="gold" if "Gold" in selected_label else "blue")
             
             next_time = chart_data.index[-1] + datetime.timedelta(hours=1)
             ax.scatter([next_time], [pred_price], color="red", s=150, label="AI Prediction", zorder=5, edgecolors='white')
             ax.plot([chart_data.index[-1], next_time], [current_price, pred_price], color="red", linestyle=":", alpha=0.8)
             
-            # SL/TPラインの描画（シグナルが出ている場合）
             if abs(diff) > p_threshold:
                 if diff > 0: # Long
                     ax.axhline(y=current_price + p_tp, color='green', linestyle='--', alpha=0.5, label="Take Profit")
@@ -294,25 +316,25 @@ with tab1:
 # === タブ2: バックテスト ===
 with tab2:
     st.header("リスク管理込みのバックテスト")
-    st.info("サイドバーの「利確幅」「損切幅」の設定も反映してシミュレーションします。")
+    st.info(f"現在の銘柄: **{selected_label}** でシミュレーションします。")
     
     p_days = st.slider("検証期間 (日)", 7, 90, 30)
 
     if st.button("この設定でテスト実行"):
         with st.spinner("シミュレーション中..."):
-            res = run_backtest_logic(df_base, params, p_days)
+            res = run_backtest_logic(df_base, params, p_days, spread_cost)
             
         if res:
             profit = res['final_balance'] - 1000000
             c1, c2, c3 = st.columns(3)
-            c1.metric("純利益", f"{int(profit):,} 円", delta_color="normal" if profit>0 else "inverse")
+            # ゴールドなどの場合、利益額の桁が変わるので注意
+            c1.metric("純利益 (参考値)", f"{int(profit):,} 円", delta_color="normal" if profit>0 else "inverse")
             c2.metric("取引回数", f"{res['total_trades']} 回")
             c3.metric("勝率", f"{res['win_rate']:.1f} %")
             
             fig, ax = plt.subplots(figsize=(10, 4))
             ax.plot(res['dates'], res['profits'], label="Total Asset", color="green")
-            ax.set_title("Asset Growth (with TP/SL)")
-            ax.set_ylabel("JPY")
+            ax.set_title("Asset Growth")
             ax.grid(True, linestyle='--', alpha=0.6)
             ax.legend()
             st.pyplot(fig)
@@ -320,7 +342,7 @@ with tab2:
 # === タブ3: Optuna最適化 ===
 with tab3:
     st.header("👑 クオンツ・モード (TP/SL最適化)")
-    st.markdown("最適なエントリー閾値だけでなく、**「どこで損切するのが一番稼げるか？」**もAIに探させます。")
+    st.markdown(f"**{selected_label}** に最適な設定をAIに探させます。")
     
     opt_days = st.slider("最適化する検証期間 (日)", 14, 60, 30)
     n_trials = st.slider("試行回数 (Trials)", 10, 100, 20)
@@ -330,18 +352,31 @@ with tab3:
         progress_bar = st.progress(0)
         
         def objective(trial):
+            # 銘柄によって探索範囲を変える
+            if ticker == "XAUUSD=X":
+                # ゴールド用: 範囲を広く
+                t_th = trial.suggest_float("threshold", 0.50, 5.00)
+                t_tp = trial.suggest_float("tp", 1.00, 20.00)
+                t_sl = trial.suggest_float("sl", 1.00, 10.00)
+            elif ticker == "BTC-USD":
+                t_th = trial.suggest_float("threshold", 50.0, 500.0)
+                t_tp = trial.suggest_float("tp", 100.0, 2000.0)
+                t_sl = trial.suggest_float("sl", 100.0, 1000.0)
+            else:
+                # ドル円など
+                t_th = trial.suggest_float("threshold", 0.01, 0.15)
+                t_tp = trial.suggest_float("tp", 0.10, 1.00)
+                t_sl = trial.suggest_float("sl", 0.05, 0.50)
+
             trial_params = {
-                # 閾値
-                "threshold": trial.suggest_float("threshold", 0.01, 0.15),
-                # 損切・利確もAIに決めさせる！
-                "tp": trial.suggest_float("tp", 0.10, 1.00), # 10銭〜1円
-                "sl": trial.suggest_float("sl", 0.05, 0.50), # 5銭〜50銭
-                # モデル設定
+                "threshold": t_th,
+                "tp": t_tp,
+                "sl": t_sl,
                 "sma_short": trial.suggest_int("sma_short", 3, 15),
                 "sma_long": trial.suggest_int("sma_long", 20, 60),
                 "n_estimators": trial.suggest_int("n_estimators", 50, 150)
             }
-            res = run_backtest_logic(df_base, trial_params, opt_days)
+            res = run_backtest_logic(df_base, trial_params, opt_days, spread_cost)
             if res and res['total_trades'] > 5: 
                 return res['final_balance']
             else:
@@ -354,25 +389,15 @@ with tab3:
             progress = (i + 1) / n_trials
             progress_bar.progress(progress)
             best_profit = study.best_value - 1000000
-            status.text(f"試行 {i+1}/{n_trials} 完了... 現在の暫定1位: +{int(best_profit):,}円")
+            status.text(f"試行 {i+1}/{n_trials} 完了... 暫定1位: +{int(best_profit):,}")
             
         st.success("探索完了！")
-        
         best_params = study.best_params
-        best_value = study.best_value - 1000000
         
-        st.subheader(f"🏆 発見された最適設定 (利益: +{int(best_value):,}円)")
-        
+        st.subheader("🏆 発見された最適設定")
         c1, c2, c3 = st.columns(3)
-        c1.metric("閾値", f"{best_params['threshold']:.3f} 円")
-        c2.metric("利確 TP", f"{best_params['tp']:.3f} 円")
-        c3.metric("損切 SL", f"{best_params['sl']:.3f} 円")
+        c1.metric("閾値", f"{best_params['threshold']:.4f}")
+        c2.metric("利確 TP", f"{best_params['tp']:.4f}")
+        c3.metric("損切 SL", f"{best_params['sl']:.4f}")
         
-        st.info("👆 サイドバーの「リスク管理」欄に、このTP/SLの値を入力してください！")
-        
-        try:
-            from optuna.visualization.matplotlib import plot_param_importances
-            fig = plot_param_importances(study)
-            st.pyplot(fig)
-        except:
-            pass
+        st.info("👆 サイドバーの設定欄に入力して、未来予測タブで使いましょう！")
