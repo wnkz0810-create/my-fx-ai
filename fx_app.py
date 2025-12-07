@@ -17,7 +17,6 @@ st.write("ドル円、ゴールドなど、複数の銘柄に対応したAI予�
 # --- サイドバー設定 (通貨ペア選択) ---
 st.sidebar.header("銘柄選択")
 
-# 選択肢の定義
 pair_options = {
     "Gold/USD (XAUUSD=X)": "XAUUSD=X",
     "USD/JPY (ドル円)": "JPY=X",
@@ -28,31 +27,26 @@ pair_options = {
 selected_label = st.sidebar.selectbox("トレードする銘柄", list(pair_options.keys()))
 ticker = pair_options[selected_label]
 
-# --- 通貨ごとのデフォルト設定を定義 ---
-# ※通貨を切り替えたときに、入力欄の初期値を自動変更するためのロジック
+# --- 通貨ごとのデフォルト設定 ---
 if ticker == "XAUUSD=X":
-    # ゴールド用（ボラティリティが大きい）
-    def_th = 2.00   # 2ドル動いたらエントリー
-    def_tp = 10.00  # 利確10ドル
-    def_sl = 5.00   # 損切5ドル
-    num_step = 0.10 # 入力の刻み幅
+    def_th = 2.00   
+    def_tp = 10.00  
+    def_sl = 5.00   
+    num_step = 0.10 
     curr_unit = "$"
 elif ticker == "JPY=X":
-    # ドル円用
     def_th = 0.050
     def_tp = 0.500
     def_sl = 0.200
     num_step = 0.001
     curr_unit = "円"
 elif ticker == "BTC-USD":
-    # ビットコイン用
     def_th = 100.0
     def_tp = 500.0
     def_sl = 300.0
     num_step = 10.0
     curr_unit = "$"
 else:
-    # ユーロドルなど（ボラティリティが小さい）
     def_th = 0.0010
     def_tp = 0.0050
     def_sl = 0.0020
@@ -62,16 +56,23 @@ else:
 # --- データ取得関数 ---
 @st.cache_data(ttl=3600)
 def get_historical_data(ticker_symbol, period="2y", interval="1h"):
-    df = yf.download(ticker_symbol, period=period, interval=interval, progress=False)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    
-    # 必要なカラムをリネームして抽出
-    df = df[['Open', 'High', 'Low', 'Close']].rename(columns={
-        'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close'
-    })
-    df = df.dropna()
-    return df
+    # エラーハンドリングを追加
+    try:
+        df = yf.download(ticker_symbol, period=period, interval=interval, progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        
+        # データが空の場合の対策
+        if df.empty:
+            return pd.DataFrame()
+
+        df = df[['Open', 'High', 'Low', 'Close']].rename(columns={
+            'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close'
+        })
+        # ここではまだdropnaしない（計算前に消すと足りなくなるため）
+        return df
+    except Exception as e:
+        return pd.DataFrame()
 
 def get_realtime_price(ticker_symbol):
     try:
@@ -84,6 +85,9 @@ def get_realtime_price(ticker_symbol):
 
 # --- バックテストロジック ---
 def run_backtest_logic(df_original, params, test_period_days, spread_cost=0):
+    if df_original is None or df_original.empty:
+        return None
+
     df = df_original.copy()
     
     sma_s = params.get('sma_short', 5)
@@ -93,6 +97,7 @@ def run_backtest_logic(df_original, params, test_period_days, spread_cost=0):
     tp_val = params.get('tp', 0.50)
     sl_val = params.get('sl', 0.20)
     
+    # 指標計算
     df['SMA_Short'] = df['Close'].rolling(window=sma_s).mean()
     df['SMA_Long'] = df['Close'].rolling(window=sma_l).mean()
     df['Change'] = df['Close'].pct_change()
@@ -103,14 +108,22 @@ def run_backtest_logic(df_original, params, test_period_days, spread_cost=0):
     df['Next_Close'] = df['Close'].shift(-1)
     df['Next_High'] = df['High'].shift(-1)
     df['Next_Low'] = df['Low'].shift(-1)
+    
+    # ここで欠損値を削除
     df = df.dropna()
+
+    # ★安全装置: dropna後にデータが残っているか確認
+    if len(df) < 50: # 最低でも50行はないと計算不可
+        return None
 
     features = ['Close', 'SMA_Short', 'SMA_Long', 'Change', 'Upper_Band', 'Lower_Band']
     X = df[features]
     y = df['Next_Close']
 
     test_rows = test_period_days * 24
-    if len(df) < test_rows + 100:
+    
+    # データ量チェック
+    if len(df) < test_rows + 50:
         return None
         
     X_train = X.iloc[:-test_rows]
@@ -129,7 +142,7 @@ def run_backtest_logic(df_original, params, test_period_days, spread_cost=0):
     balance = 1000000 
     cumulative_profit = []
     dates = []
-    trade_amount = 10000 # ※ゴールドの場合1Lot=100oz等の計算が必要だが、ここではシンプルに変動幅×10000とする
+    trade_amount = 10000 
     total_trades = 0
     wins = 0
     
@@ -188,7 +201,7 @@ tab1, tab2, tab3 = st.tabs(["🔮 未来予測", "📊 バックテスト", "⚙
 
 df_base = get_historical_data(ticker)
 
-# 左サイドバー設定（keyにtickerを含めることで、銘柄変更時に値をリセットさせる）
+# 左サイドバー設定
 st.sidebar.markdown("---")
 st.sidebar.header(f"パラメータ ({curr_unit})")
 
@@ -217,12 +230,10 @@ params = {
     "n_estimators": p_n_est
 }
 
-# スプレッドコスト（簡易設定）
-# ゴールドはスプレッドが広いので、ドル円より少し高めに仮定
 if ticker == "XAUUSD=X":
-    spread_cost = 0.30 # 0.3ドル (30pips相当)
+    spread_cost = 0.30 
 elif ticker == "JPY=X":
-    spread_cost = 0.003 # 0.3銭
+    spread_cost = 0.003 
 else:
     spread_cost = 0.0003
 
@@ -230,88 +241,109 @@ else:
 with tab1:
     st.header(f"🔮 {selected_label} 未来予測")
     
-    if st.button("最新レートで予測する", type="primary"):
-        with st.spinner("AIが思考中..."):
-            df_future = df_base.copy()
-            realtime = get_realtime_price(ticker)
-            if realtime:
-                df_future.iloc[-1, df_future.columns.get_loc('Close')] = realtime
-            
-            df_future['SMA_Short'] = df_future['Close'].rolling(window=p_sma_s).mean()
-            df_future['SMA_Long'] = df_future['Close'].rolling(window=p_sma_l).mean()
-            df_future['Change'] = df_future['Close'].pct_change()
-            df_future['Std'] = df_future['Close'].rolling(window=20).std()
-            df_future['Upper_Band'] = df_future['SMA_Long'] + (df_future['Std'] * 2)
-            df_future['Lower_Band'] = df_future['SMA_Long'] - (df_future['Std'] * 2)
-            
-            df_future['Next_Close'] = df_future['Close'].shift(-1)
-            
-            features = ['Close', 'SMA_Short', 'SMA_Long', 'Change', 'Upper_Band', 'Lower_Band']
-            X = df_future[features]
-            y = df_future['Next_Close']
-            
-            latest_row = X.iloc[[-1]]
-            X_train = X.iloc[:-1].dropna()
-            y_train = y.iloc[:-1].dropna()
-            
-            common_idx = X_train.index.intersection(y_train.index)
-            X_train = X_train.loc[common_idx]
-            y_train = y_train.loc[common_idx]
-            
-            model = RandomForestRegressor(n_estimators=p_n_est, random_state=42)
-            model.fit(X_train, y_train)
-            
-            pred_price = model.predict(latest_row)[0]
-            current_price = df_future['Close'].iloc[-1]
-            diff = pred_price - current_price
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                st.metric("現在レート", f"{current_price:.2f} {curr_unit}")
-            with c2:
-                st.metric("AI予測 (Next 1h)", f"{pred_price:.2f} {curr_unit}", delta=f"{diff:.2f} {curr_unit}")
-            
-            st.markdown("---")
-            if diff > p_threshold:
-                st.success(f"📈 **買いシグナル** detected!")
-                st.markdown(f"""
-                - **エントリー**: {current_price:.2f}
-                - **利確目標 (TP)**: {current_price + p_tp:.2f}
-                - **損切ライン (SL)**: {current_price - p_sl:.2f}
-                """)
-            elif diff < -p_threshold:
-                st.error(f"📉 **売りシグナル** detected!")
-                st.markdown(f"""
-                - **エントリー**: {current_price:.2f}
-                - **利確目標 (TP)**: {current_price - p_tp:.2f}
-                - **損切ライン (SL)**: {current_price + p_sl:.2f}
-                """)
-            else:
-                st.warning("✋ 様子見 (予測幅が小さいです)")
+    if df_base is None or df_base.empty:
+        st.error("データの取得に失敗しました。しばらく待ってからリロードしてください。")
+    else:
+        if st.button("最新レートで予測する", type="primary"):
+            with st.spinner("AIが思考中..."):
+                df_future = df_base.copy()
+                realtime = get_realtime_price(ticker)
+                if realtime:
+                    df_future.iloc[-1, df_future.columns.get_loc('Close')] = realtime
+                
+                # 特徴量計算
+                df_future['SMA_Short'] = df_future['Close'].rolling(window=p_sma_s).mean()
+                df_future['SMA_Long'] = df_future['Close'].rolling(window=p_sma_l).mean()
+                df_future['Change'] = df_future['Close'].pct_change()
+                df_future['Std'] = df_future['Close'].rolling(window=20).std()
+                df_future['Upper_Band'] = df_future['SMA_Long'] + (df_future['Std'] * 2)
+                df_future['Lower_Band'] = df_future['SMA_Long'] - (df_future['Std'] * 2)
+                
+                df_future['Next_Close'] = df_future['Close'].shift(-1)
+                
+                features = ['Close', 'SMA_Short', 'SMA_Long', 'Change', 'Upper_Band', 'Lower_Band']
+                X = df_future[features]
+                y = df_future['Next_Close']
+                
+                # ★修正ポイント: 安全装置を追加
+                # 最後の行を取得したいが、dropna前にデータがあるか確認
+                if len(X) == 0:
+                    st.error("データ不足のため予測できません。パラメータ（期間など）を見直してください。")
+                else:
+                    latest_row = X.iloc[[-1]] # 予測対象（最新）
+                    
+                    # 学習データ作成（NaNを削除）
+                    X_train = X.iloc[:-1].dropna()
+                    y_train = y.iloc[:-1].dropna()
+                    
+                    # 学習データが空になっていないかチェック
+                    if len(X_train) == 0:
+                        st.error("有効な学習データがありません。過去データの取得期間を長くしてください。")
+                    else:
+                        common_idx = X_train.index.intersection(y_train.index)
+                        X_train = X_train.loc[common_idx]
+                        y_train = y_train.loc[common_idx]
+                        
+                        # 特徴量に欠損（NaN）が含まれていないか最終チェック
+                        latest_row = latest_row.fillna(method='ffill') # 念のため穴埋め
+                        if latest_row.isnull().values.any():
+                             st.warning("直近データの一部が欠損していますが、予測を続行します。")
+                             latest_row = latest_row.fillna(0) # 強制埋め
 
-            # グラフ描画
-            st.subheader("直近チャート")
-            chart_data = df_future.tail(72)
-            fig, ax = plt.subplots(figsize=(12, 5))
-            ax.plot(chart_data.index, chart_data['Close'], label="History", color="gold" if "Gold" in selected_label else "blue")
-            
-            next_time = chart_data.index[-1] + datetime.timedelta(hours=1)
-            ax.scatter([next_time], [pred_price], color="red", s=150, label="AI Prediction", zorder=5, edgecolors='white')
-            ax.plot([chart_data.index[-1], next_time], [current_price, pred_price], color="red", linestyle=":", alpha=0.8)
-            
-            if abs(diff) > p_threshold:
-                if diff > 0: # Long
-                    ax.axhline(y=current_price + p_tp, color='green', linestyle='--', alpha=0.5, label="Take Profit")
-                    ax.axhline(y=current_price - p_sl, color='red', linestyle='--', alpha=0.5, label="Stop Loss")
-                else: # Short
-                    ax.axhline(y=current_price - p_tp, color='green', linestyle='--', alpha=0.5, label="Take Profit")
-                    ax.axhline(y=current_price + p_sl, color='red', linestyle='--', alpha=0.5, label="Stop Loss")
+                        model = RandomForestRegressor(n_estimators=p_n_est, random_state=42)
+                        model.fit(X_train, y_train)
+                        
+                        pred_price = model.predict(latest_row)[0]
+                        current_price = df_future['Close'].iloc[-1]
+                        diff = pred_price - current_price
+                        
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            st.metric("現在レート", f"{current_price:.2f} {curr_unit}")
+                        with c2:
+                            st.metric("AI予測 (Next 1h)", f"{pred_price:.2f} {curr_unit}", delta=f"{diff:.2f} {curr_unit}")
+                        
+                        st.markdown("---")
+                        if diff > p_threshold:
+                            st.success(f"📈 **買いシグナル** detected!")
+                            st.markdown(f"""
+                            - **エントリー**: {current_price:.2f}
+                            - **利確目標 (TP)**: {current_price + p_tp:.2f}
+                            - **損切ライン (SL)**: {current_price - p_sl:.2f}
+                            """)
+                        elif diff < -p_threshold:
+                            st.error(f"📉 **売りシグナル** detected!")
+                            st.markdown(f"""
+                            - **エントリー**: {current_price:.2f}
+                            - **利確目標 (TP)**: {current_price - p_tp:.2f}
+                            - **損切ライン (SL)**: {current_price + p_sl:.2f}
+                            """)
+                        else:
+                            st.warning("✋ 様子見 (予測幅が小さいです)")
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%d日 %H:00'))
-            plt.xticks(rotation=45)
-            ax.grid(True, linestyle='--', alpha=0.6)
-            ax.legend()
-            st.pyplot(fig)
+                        # グラフ描画
+                        st.subheader("直近チャート")
+                        chart_data = df_future.tail(72)
+                        fig, ax = plt.subplots(figsize=(12, 5))
+                        ax.plot(chart_data.index, chart_data['Close'], label="History", color="gold" if "Gold" in selected_label else "blue")
+                        
+                        next_time = chart_data.index[-1] + datetime.timedelta(hours=1)
+                        ax.scatter([next_time], [pred_price], color="red", s=150, label="AI Prediction", zorder=5, edgecolors='white')
+                        ax.plot([chart_data.index[-1], next_time], [current_price, pred_price], color="red", linestyle=":", alpha=0.8)
+                        
+                        if abs(diff) > p_threshold:
+                            if diff > 0: 
+                                ax.axhline(y=current_price + p_tp, color='green', linestyle='--', alpha=0.5, label="Take Profit")
+                                ax.axhline(y=current_price - p_sl, color='red', linestyle='--', alpha=0.5, label="Stop Loss")
+                            else: 
+                                ax.axhline(y=current_price - p_tp, color='green', linestyle='--', alpha=0.5, label="Take Profit")
+                                ax.axhline(y=current_price + p_sl, color='red', linestyle='--', alpha=0.5, label="Stop Loss")
+
+                        ax.xaxis.set_major_formatter(mdates.DateFormatter('%d日 %H:00'))
+                        plt.xticks(rotation=45)
+                        ax.grid(True, linestyle='--', alpha=0.6)
+                        ax.legend()
+                        st.pyplot(fig)
 
 # === タブ2: バックテスト ===
 with tab2:
@@ -321,23 +353,27 @@ with tab2:
     p_days = st.slider("検証期間 (日)", 7, 90, 30)
 
     if st.button("この設定でテスト実行"):
-        with st.spinner("シミュレーション中..."):
-            res = run_backtest_logic(df_base, params, p_days, spread_cost)
-            
-        if res:
-            profit = res['final_balance'] - 1000000
-            c1, c2, c3 = st.columns(3)
-            # ゴールドなどの場合、利益額の桁が変わるので注意
-            c1.metric("純利益 (参考値)", f"{int(profit):,} 円", delta_color="normal" if profit>0 else "inverse")
-            c2.metric("取引回数", f"{res['total_trades']} 回")
-            c3.metric("勝率", f"{res['win_rate']:.1f} %")
-            
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.plot(res['dates'], res['profits'], label="Total Asset", color="green")
-            ax.set_title("Asset Growth")
-            ax.grid(True, linestyle='--', alpha=0.6)
-            ax.legend()
-            st.pyplot(fig)
+        if df_base is None or df_base.empty:
+            st.error("データが空のためバックテストできません。")
+        else:
+            with st.spinner("シミュレーション中..."):
+                res = run_backtest_logic(df_base, params, p_days, spread_cost)
+                
+            if res:
+                profit = res['final_balance'] - 1000000
+                c1, c2, c3 = st.columns(3)
+                c1.metric("純利益 (参考値)", f"{int(profit):,} 円", delta_color="normal" if profit>0 else "inverse")
+                c2.metric("取引回数", f"{res['total_trades']} 回")
+                c3.metric("勝率", f"{res['win_rate']:.1f} %")
+                
+                fig, ax = plt.subplots(figsize=(10, 4))
+                ax.plot(res['dates'], res['profits'], label="Total Asset", color="green")
+                ax.set_title("Asset Growth")
+                ax.grid(True, linestyle='--', alpha=0.6)
+                ax.legend()
+                st.pyplot(fig)
+            else:
+                st.warning("データ不足のためバックテスト結果を表示できません。期間を短くするか、銘柄を変更してください。")
 
 # === タブ3: Optuna最適化 ===
 with tab3:
@@ -348,56 +384,56 @@ with tab3:
     n_trials = st.slider("試行回数 (Trials)", 10, 100, 20)
     
     if st.button("最強のリスク管理設定を探す", type="primary"):
-        status = st.empty()
-        progress_bar = st.progress(0)
-        
-        def objective(trial):
-            # 銘柄によって探索範囲を変える
-            if ticker == "XAUUSD=X":
-                # ゴールド用: 範囲を広く
-                t_th = trial.suggest_float("threshold", 0.50, 5.00)
-                t_tp = trial.suggest_float("tp", 1.00, 20.00)
-                t_sl = trial.suggest_float("sl", 1.00, 10.00)
-            elif ticker == "BTC-USD":
-                t_th = trial.suggest_float("threshold", 50.0, 500.0)
-                t_tp = trial.suggest_float("tp", 100.0, 2000.0)
-                t_sl = trial.suggest_float("sl", 100.0, 1000.0)
-            else:
-                # ドル円など
-                t_th = trial.suggest_float("threshold", 0.01, 0.15)
-                t_tp = trial.suggest_float("tp", 0.10, 1.00)
-                t_sl = trial.suggest_float("sl", 0.05, 0.50)
-
-            trial_params = {
-                "threshold": t_th,
-                "tp": t_tp,
-                "sl": t_sl,
-                "sma_short": trial.suggest_int("sma_short", 3, 15),
-                "sma_long": trial.suggest_int("sma_long", 20, 60),
-                "n_estimators": trial.suggest_int("n_estimators", 50, 150)
-            }
-            res = run_backtest_logic(df_base, trial_params, opt_days, spread_cost)
-            if res and res['total_trades'] > 5: 
-                return res['final_balance']
-            else:
-                return 0 
-
-        study = optuna.create_study(direction="maximize")
-        
-        for i in range(n_trials):
-            study.optimize(objective, n_trials=1)
-            progress = (i + 1) / n_trials
-            progress_bar.progress(progress)
-            best_profit = study.best_value - 1000000
-            status.text(f"試行 {i+1}/{n_trials} 完了... 暫定1位: +{int(best_profit):,}")
+        if df_base is None or df_base.empty:
+            st.error("データが空のため最適化できません。")
+        else:
+            status = st.empty()
+            progress_bar = st.progress(0)
             
-        st.success("探索完了！")
-        best_params = study.best_params
-        
-        st.subheader("🏆 発見された最適設定")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("閾値", f"{best_params['threshold']:.4f}")
-        c2.metric("利確 TP", f"{best_params['tp']:.4f}")
-        c3.metric("損切 SL", f"{best_params['sl']:.4f}")
-        
-        st.info("👆 サイドバーの設定欄に入力して、未来予測タブで使いましょう！")
+            def objective(trial):
+                if ticker == "XAUUSD=X":
+                    t_th = trial.suggest_float("threshold", 0.50, 5.00)
+                    t_tp = trial.suggest_float("tp", 1.00, 20.00)
+                    t_sl = trial.suggest_float("sl", 1.00, 10.00)
+                elif ticker == "BTC-USD":
+                    t_th = trial.suggest_float("threshold", 50.0, 500.0)
+                    t_tp = trial.suggest_float("tp", 100.0, 2000.0)
+                    t_sl = trial.suggest_float("sl", 100.0, 1000.0)
+                else:
+                    t_th = trial.suggest_float("threshold", 0.01, 0.15)
+                    t_tp = trial.suggest_float("tp", 0.10, 1.00)
+                    t_sl = trial.suggest_float("sl", 0.05, 0.50)
+
+                trial_params = {
+                    "threshold": t_th,
+                    "tp": t_tp,
+                    "sl": t_sl,
+                    "sma_short": trial.suggest_int("sma_short", 3, 15),
+                    "sma_long": trial.suggest_int("sma_long", 20, 60),
+                    "n_estimators": trial.suggest_int("n_estimators", 50, 150)
+                }
+                res = run_backtest_logic(df_base, trial_params, opt_days, spread_cost)
+                if res and res['total_trades'] > 5: 
+                    return res['final_balance']
+                else:
+                    return 0 
+
+            study = optuna.create_study(direction="maximize")
+            
+            for i in range(n_trials):
+                study.optimize(objective, n_trials=1)
+                progress = (i + 1) / n_trials
+                progress_bar.progress(progress)
+                best_profit = study.best_value - 1000000
+                status.text(f"試行 {i+1}/{n_trials} 完了... 暫定1位: +{int(best_profit):,}")
+                
+            st.success("探索完了！")
+            best_params = study.best_params
+            
+            st.subheader("🏆 発見された最適設定")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("閾値", f"{best_params['threshold']:.4f}")
+            c2.metric("利確 TP", f"{best_params['tp']:.4f}")
+            c3.metric("損切 SL", f"{best_params['sl']:.4f}")
+            
+            st.info("👆 サイドバーの設定欄に入力して、未来予測タブで使いましょう！")
