@@ -18,7 +18,8 @@ st.write("ドル円、ゴールドなど、複数の銘柄に対応したAI予�
 st.sidebar.header("銘柄選択")
 
 pair_options = {
-    "Gold/USD (XAUUSD=X)": "XAUUSD=X",
+    # 修正: XAUUSD=X だとエラーが出やすいので、安定している GC=F (金先物) に変更
+    "Gold (金先物 GC=F)": "GC=F", 
     "USD/JPY (ドル円)": "JPY=X",
     "EUR/USD (ユーロドル)": "EURUSD=X",
     "BTC/USD (ビットコイン)": "BTC-USD"
@@ -437,3 +438,4 @@ with tab3:
             c3.metric("損切 SL", f"{best_params['sl']:.4f}")
             
             st.info("👆 サイドバーの設定欄に入力して、未来予測タブで使いましょう！")
+
