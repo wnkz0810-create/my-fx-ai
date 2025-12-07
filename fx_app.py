@@ -392,15 +392,21 @@ with tab3:
             progress_bar = st.progress(0)
             
             def objective(trial):
-                if ticker == "XAUUSD=X":
-                    t_th = trial.suggest_float("threshold", 0.50, 5.00)
-                    t_tp = trial.suggest_float("tp", 1.00, 20.00)
-                    t_sl = trial.suggest_float("sl", 1.00, 10.00)
+                # ★修正ポイント: GC=F (ゴールド先物) を特別扱いする
+                if ticker == "GC=F" or ticker == "XAUUSD=X":
+                    # ゴールド用: 範囲を「ドル単位」に大きくする
+                    # 閾値: 1ドル〜10ドルの動きのみ狙う（ノイズ無視）
+                    t_th = trial.suggest_float("threshold", 1.00, 10.00)
+                    # 利確: 5ドル〜30ドル
+                    t_tp = trial.suggest_float("tp", 5.00, 30.00)
+                    # 損切: 3ドル〜20ドル
+                    t_sl = trial.suggest_float("sl", 3.00, 20.00)
                 elif ticker == "BTC-USD":
                     t_th = trial.suggest_float("threshold", 50.0, 500.0)
                     t_tp = trial.suggest_float("tp", 100.0, 2000.0)
                     t_sl = trial.suggest_float("sl", 100.0, 1000.0)
                 else:
+                    # ドル円など
                     t_th = trial.suggest_float("threshold", 0.01, 0.15)
                     t_tp = trial.suggest_float("tp", 0.10, 1.00)
                     t_sl = trial.suggest_float("sl", 0.05, 0.50)
@@ -427,7 +433,7 @@ with tab3:
                 progress_bar.progress(progress)
                 best_profit = study.best_value - 1000000
                 status.text(f"試行 {i+1}/{n_trials} 完了... 暫定1位: +{int(best_profit):,}")
-                
+            
             st.success("探索完了！")
             best_params = study.best_params
             
@@ -437,5 +443,4 @@ with tab3:
             c2.metric("利確 TP", f"{best_params['tp']:.4f}")
             c3.metric("損切 SL", f"{best_params['sl']:.4f}")
             
-            st.info("👆 サイドバーの設定欄に入力して、未来予測タブで使いましょう！")
-
+            st.info("👆 サイドバーの設定欄に入力して、バックテストを再実行してください！")
