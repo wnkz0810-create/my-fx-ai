@@ -70,14 +70,14 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.header("取引設定")
 
-# 取引量の入力 (デフォルト値を銘柄によって切り替える)
+# 取引量の入力 (警告対策: formatを%.0fに変更)
 trade_amount = st.sidebar.number_input(
     "1回の取引量 (Lot/Unit)", 
     min_value=0.01, 
     max_value=1000000.0, 
     value=float(default_amount), 
     step=100.0 if default_amount >= 100 else 0.1,
-    format="%.2f" if default_amount < 10 else "%d",
+    format="%.2f" if default_amount < 10 else "%.0f", # ここを修正しました
     help="ゴールドなら100、ドル円なら10000などが目安です。"
 )
 
